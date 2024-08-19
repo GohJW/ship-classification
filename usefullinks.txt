@@ -1,0 +1,241 @@
+#site to look for ship information
+https://coast.noaa.gov/htdata/CMSP/AISDataHandler/2020/index.html
+
+#information on the Sentinel-1 GRD dataset
+https://sentinels.copernicus.eu/web/sentinel/user-guides/sentinel-1-sar/resolutions/level-1-ground-range-detected
+
+#Exporting images from Earth Engine to Drive
+https://stackoverflow.com/questions/71834208/why-is-the-export-to-the-drive-empty-when-using-google-earth-engine-in-python-w
+
+#Training image classification with both image and feature data? e.g giving additional data such as heading SOG, COG
+https://www.mathworks.com/help/deeplearning/ug/train-network-on-image-and-feature-data.html
+https://pytorch.org/tutorials/beginner/basics/data_tutorial.html
+https://ieeexplore.ieee.org/document/9712278
+
+#Using pretrained models
+https://pytorch.org/tutorials/beginner/transfer_learning_tutorial.html
+
+#check status of exported images
+https://code.earthengine.google.com/tasks
+
+
+check SOG < 0.1, get unique mmsi
+time filter by day
+
+for each unique mmsi, take first entry and look for image, if image found, compare image time to all entries'
+BaseDateTime, take the smallest timediff and store in a seperate df. Save df at the end.
+
+01-04
+waterbody 85
+drop endtime
+
+waterbody and cropping of image together
+run in python 
+parallel process data with multiprocessing
+
+
+filtering of ship information
+need to align datetime of image and ship, time difference minimised, whether the boat moved in that timeframe etc.
+1st iteration:
+- Go through AIS data, take latlon and search for time period of BaseDateTime +-4hrs to increase chance of boat within image, if image found store it
+- Difficulty identifing if boat is within 700m of the original latlon in the AIS image even with basedatetime criteria
+- Some ships are in port, lots of terrain which influence the image, we want clean ships in open waterbodies
+2nd iteration:
+- to get cleaner images, we use another terrain map, after obtaining an image, we check 700mx700m area around the latlon in the terrain map and calculate
+percentage waterbody, throw away rows with less than a certain percentage waterbody.
+- Eliminates alot of ships in port or rivers, but significantly reduces our usable images. Additionally, 7 million for 2020-01-01, 3 day scanning,
+ less than 10 percent gone through
+3rd iteration:
+- To further increase chance of boat actually appearing in image, we use SOG (Speed over ground), we filter boats that have SOG less than 0.1 to maximise
+the chances of the boat still remaining in the image when its taken. Further reduces usable images.
+4th iteration:
+- With help of supervisors, discovered with the data queried thus far that alot of data entries are from the same boat since boats report AIS data at time 
+intervals, aka every hour or so, alot of duplicates of a ship at different locations throughout 1 day.
+- Figured out when looking at final queried images with waterbody percentage, alot of outputs are boats of same name and MMSI, but at different time and latlon,
+resultant image found also points to the same boat within the image. If a boat is stationary for 4 hours and reports every hour, all 4 outputs are dealt as seperate
+entries and point to the same SAR image, resulting in dupe images with different AIS data, possibly diluting image pool.
+- To solve,first filter by SOG < 0.1. Rather than looping through table indices, loop through unique MMSI, for the first entry of each MMSI, if an image is found, we calc timediff between that image and
+all entries of that MMSI, sort by the timediff and take the shortest time. Taking shortest timediff minimises boat moving during time period.
+- Filtering by unique MMSI significantly decreases api queries from 7 million -> 13 thousand, much faster and able to query more days, solving the low image yield issue. This also means instead of querying by timeframe +-4hrs,
+we can query for the whole day instead without significant slowdown. 
+5th iteration:
+- When cropping images, due to selecting lowest time diff, it is possible that the latlon of the lowest timediff is not within the image identified, resulting in errors cropping the image chip. Since unique MMSI sorted by timediff, as well
+as ability to search by whole day timeframe, its possible throughout a day the ship moves out of the image zone, but at the time it reports its AIS it is closest to when the image is taken, resulting in a mismatch in location of boat and image.
+- To solve this, rather than simply taking the shortest timediff, we go down the rows and check the next shortest time diff if the lowest timediff latlon is not within the boundaries of the image.
+- When testing, doing this becomes inefficient, we are looping through all rows, worst case scenario for a unique MMSI, there can be a few thousand AIS reports per day, the row where the latlon is within the image boundaries could be the longest 
+timediff, meaning we have to go through all few thousand queries to calculate if each latlon is within the image boundary.
+- Going down the timediff also increases the chances of the boat not being in the image at its location as increasing timediff means a larger timeframe that the boat could move from its reported position. Even if we do eventually find a latlon
+within boundaries, when checking image the boat is no longer in the area.
+- Ultimately, decision was made to simply throw away row if the shortest timediff is not within the image. This results in minimal yield loss as the reduced time taken to query from querying unique MMSI over indices allows for querying of more days of data,
+we can afford to lose some possible valid yields to save a significant amount of querying time that can be spent querying more data. Lower yield per day but ability to query over more days makes up for yield loss.
+
+focal loss 
+threshholding exposure:
+otsu, mean, median
+
+running old getData on Jan to Feb
+
+getting closes ship:
+- Filter df by unique image name
+- check size of filtered df, if 1, set value as 0 and continue as there is only 1 ship in image
+- otherwise for each row in this new df, pairwise comparison with all other rows for distance, take min
+
+transforming dataset:
+centercrop image to get standard size 64X64
+normalise
+feed to resnet50 model
+    
+
+
+balance accuracy: average accuracy for each class
+overall accuracy
+confusion matrix
+
+model batch size, cross entropy loss, epochs
+
+reading geotiff with rasterio, image is geocoded and transformed, making array size incorrect and filled with
+invalid nan
+- centercrop by 64 to eliminate problem temporarily, however ship heading changes, doesnt solve root problem
+of why image size is 140 rather than 70
+- try rasterio warptedvrt, with identity geo transform
+- another way is to simply replace nan values then resize image
+
+model expects Double but gets Float? 
+- Adjusting Nan values in tensor, replacing NaN with tensor median of non-NaN values returns a Double type, which
+is not compatible with the model. Model expects Float tensors, simply return tensor.float() to solve
+
+loss becomes NaN after first batch of training
+- Playing with Learning rate doesn't seem to help with this, might not be learning rate issue
+- inputs checked to make sure no nan values that may cause this
+- can try learning rate decay as well to improve performance
+- try gradient clipping
+
+Issue with nan not with gradient, but with image inputs. Some images return true for within the image boundaries, but exists in areas where image has nodata pixels.
+- Temp fix by refiltering each image by checking if np.isnan.all() is true, if true drop the row
+- Try to incoporate with getData or cutChip in the future?
+
+-norm on whole dataset
+-crop instead of resize
+-take balanced accuracy (average accuracy for each class)
+-try data augmentation
+-try with more data
+-get more chips and script to crop missing chips
+-when model done with set params, run for each config into tensorboard?
+
+Adam optimisers seem to be improving then deproving loss beyond a certain number of epochs, clipping gradient seems to help
+Data augmentation significantly decreases accuracy, may need more epochs
+
+scheduler was fit on balanced_acc, changed to fitting on validation loss instead
+efficientnet model was changed from efficientnet_b1 to efficientnet_v2_s
+
+shuffle datloader
+decreasing augmentation
+remove 90
+train more to overfit train data
+readjust dataset to 3channels and try with pretrained weights
+
+ensemble?
+
+500epochs on regular still not above 80trainaccuracy
+2000epochs lr0.001 on augmented data results in nan, lr too high?
+adjust patience level of scheduler to prevent exploding gradient
+
+retry best params thus far with more complex model, resnet101, efficientnet_v2_m etc.
+increase patience and decrease factor to adjust train balanced accuracy, tapering of lr before model fully fits on train set
+start straight from smaller lr0.0001
+
+Tapering of train accuracy, caused by scheduler decreasing lr too early. Scheduler used originally because
+Adam optimiser caused exploding gradients, scheduler used to prevent that. However, with SGD it was causing the model to not fully learn all features of the dataset. Increasing 
+patience and decreasing factor at which lr was decreased seem to improve balanced accuracy, but model still not fitting fully to the train dataset. Tested with no scheduler at 0.001lr,
+accuracy significantly improved.
+
+Another possible reason for model unable to fully fit dataset was due to too simple model? Highly unlikely, but changed resnet model from resenet50 to resnet101 anyway.
+
+changed schedulerstep on train loss rather than test loss to increase train accuracy, dk how it would improve
+gradient explodes for 11k dataset with SMOTE, try with lr0.0001 in AIstack
+try weight regularisation
+
+
+Try using Smote on the training dataset w/wo data augmentation
+try label smoothing to improve generalisation
+
+try with pretrained
+scheduler change to cosine
+dual channel
+3rd channel 0, augment before adding 3rd channel
+exposure and colour
+try cosine scheduler on smote if not work discard
+
+try pretrained on augmented and SMOTE
+when trying to modify for dual channel, realised the channels could have been wrong since channel order was wrong, loading CxHxW into a function that requires HxWxC, somehow the model
+loaded and when printing to check my images it still looked okay, modified now and trying to train again. Could have been the reason why model keeps going haywire.
+
+Pretrained weights work alot better, using the same model on dual channel images with a padded 0 third channel increased accuracy to >70 percent, now to improve the model
+we use augmentation. SMOTE alone is not better, try SMOTE with augments?
+SMOTE with augments also doesnt work better.
+
+SMOTE does not seem to help with much improvement of the model compared to augmentations. 2-3percent below augments. Could be within the margin of error. However, throughout training,
+it seems that SMOTE datasets perform much better when trainingwith regards to exploding gradients compared to simply using class weights. 
+The issue with exploding gradients does not seem to go away even with small learning rates to the power of 1e-6. This issue doesnt appear with SMOTE datasets, 
+meaning the cause of this could stem from the imbalanced dataset itself. 
+Running the same test with class weights instead of SMOTE, occasionally the gradients explode or accuracy siginficantly drops. Perhaps by nature of the dataset, the minima is a very steep one. With the
+randomness of dataloading as well as use of cosineannealing for learning rates could result in the point jumping out of this minima, thus 'exploding' or resulting in significant 
+decrease in accuracy.
+
+Test with simple overrandomsampling of the minority class.(Simple is best?)
+
+Try progressive resizing, training model on smaller size image, then use those weights to train the larger image? The problem doesnt seem to stem from the model itself so might
+not be the issue.
+
+with weighted ramdom sampler:
+weights     count
+0.000442    2260
+0.000460    2175
+0.001637     611
+0.002342     427
+0.003663     273
+
+colorjitter works badly, might be due to normalisation before applying augmentation, try augment before norming.
+Try with Albumentations Library for a larger set of augmentations
+
+training with blur needs longer to train, might work better than just aggressive augmenting
+
+pretrained vs non pretrained, without pretrained, still has a chance to explode even when using oversampler
+focal loss criterion
+analysis of misclassification with gradcam
+
+increasing dataset from 11k to 12k introduces a new vesseltype 37 'pleasure craft' which affects accuracy, pretrained vs non pretrained tested with both 11k and 12k
+focal loss done on 11k first then 12k
+weighted and oversampling with augments focal loss both end up exploding
+without augments, focal loss still explodes
+
+gradcam implementation, done in seperate python script? requires reloading and processing of dataloader with 
+same random state. Seperate dataset into, train test, but have a manual csv for validation to more easily compare
+with gradcam.This would make gradcam easier to use.
+
+For all data in validation set, see if it is classified correctly or incorrectly first, followed by gradcam to see 
+the parts of the images that result in the predicted label.
+
+gradcam images seem to have gradient all in the same area regardless of actual or predicted labels, even though ship may not be in the exact area, maybe overconfidence from the
+model?
+images 43, 47 , compare 49 50 51, 56 85, 99, 100, 111, 119 no ship
+
+good image
+-batch2 sample30 correct 
+-batch0 sample8 incorrect
+
+gradient not focused on ship
+- batch0 sample54 correct 
+-batch0 sample6 incorrect
+-batch0 sample66 correct
+-batch5 sample57
+-batch7 sample40
+
+multiple ship images
+-batch1 sample11 correct 
+-batch0 sample22 incorrect
+-batch7 sample66 correct
+-batch10 sample24 correct
+-batch0 sample20 correct
+off centre cropped ships
+-batch0 sample0
